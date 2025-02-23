@@ -8,7 +8,7 @@ from __future__ import annotations
 from argparse import ArgumentParser
 from pathlib import Path
 from shutil import copytree
-from typing import Any, NamedTuple
+from typing import Any
 
 from casacore.tables import table
 
@@ -17,11 +17,16 @@ from flint.flagging import nan_zero_extreme_flag_ms
 from flint.logging import logger
 from flint.ms import MS, rename_ms_and_columns_for_selfcal
 from flint.naming import get_selfcal_ms_name
+from flint.options import BaseOptions
 from flint.sclient import singularity_wrapper
+from flint.selfcal.utils import (
+    create_and_check_caltable_path,
+    get_channel_ranges_given_nspws_for_ms,
+)
 from flint.utils import remove_files_folders, rsync_copy_directory, zip_folder
 
 
-class GainCalOptions(NamedTuple):
+class GainCalOptions(BaseOptions):
     """Options provided to the casatasks gaincal function. Most options correspond to those in gaincal."""
 
     solint: str = "60s"
@@ -39,16 +44,10 @@ class GainCalOptions(NamedTuple):
     gaintype: str = "G"
     """The gain type that would be solved for. """
     nspw: int = 1
-    """The number of spectral windows to use during the self-calibration routine. If 1, no changes
-    are made to the measurement set. If more than 1, then the measurement will be reformed to form
-    a new measurement set conforming to the number of spws set. This process can be fragile as the
-    casa tasks sometimes do not like the configure, so ye warned."""
-
-    def with_options(self, **kwargs) -> GainCalOptions:
-        _dict = self._asdict()
-        _dict.update(**kwargs)
-
-        return GainCalOptions(**_dict)
+    """The number of spectral windows to use during the self-calibration routine. This
+    will be used to craft an appropriate ``select_spw=`` interval range. If larger
+    than one, ``gaincal`` will be carried out against each interval and results will
+    be appended to a common solutions file. """
 
 
 def args_to_casa_task_string(task: str, **kwargs) -> str:
@@ -64,7 +63,10 @@ def args_to_casa_task_string(task: str, **kwargs) -> str:
     """
     command = []
     for k, v in kwargs.items():
-        if isinstance(v, (str, Path)):
+        if isinstance(v, (list, tuple)):
+            v = ",".join(rf"'{_v!s}'" for _v in v)
+            arg = rf"{k}=({v})"
+        elif isinstance(v, (str, Path)):
             arg = rf"{k}='{v!s}'"
         else:
             arg = rf"{k}={v}"
@@ -130,10 +132,10 @@ def gaincal(**kwargs) -> str:
     Returns:
         str: The command to execute
     """
-    applycal_str = args_to_casa_task_string(task="gaincal", **kwargs)
-    logger.info(f"{applycal_str=}")
+    gaincal_str = args_to_casa_task_string(task="gaincal", **kwargs)
+    logger.info(f"{gaincal_str=}")
 
-    return applycal_str
+    return gaincal_str
 
 
 def copy_and_clean_ms_casagain(
@@ -370,76 +372,62 @@ def gaincal_applycal_ms(
         logger.info(f"{skip_selfcal=}, not calibrating the MS. ")
         return cal_ms
 
-    cal_table = cal_ms.path.absolute().parent / cal_ms.path.with_suffix(".caltable")
-    logger.info(f"Will create calibration table {cal_table}.")
-
-    if cal_table.exists():
-        logger.warning(f"Removing {cal_table!s}")
-        remove_files_folders(cal_table)
-
-    # This is used for when a frequency dependent self-calibration solution is requested.
-    # Apparently in the casa way of life the gaincal task (used below) automatically does
-    # this when it detects multiple spectral windows in the measurement set. By default,
-    # the typical ASKAP MS has a single one. When nspw > 1, a combination of mstransorm+cvel
-    # is used to add multiple spws, gaincal, applycal, cvel back to a single spw. Why a
-    # single spw? Some tasks just work better with it - and this pirate likes a simple life
-    # on the seven seas. Also have no feeling of what the yandasoft suite prefers.
-    if gain_cal_options.nspw > 1:
-        cal_path = create_spws_in_ms(
-            ms_path=cal_ms.path,
-            casa_container=casa_container,
-            nspw=gain_cal_options.nspw,
-        )
-        # At the time of writing the output path returned above should always
-        # be the same as the ms_path=, however me be a ye paranoid pirate who
-        # trusts no one of the high seas
-        cal_ms = cal_ms.with_options(path=cal_path)
-
-    gaincal(
-        container=casa_container,
-        bind_dirs=(cal_ms.path.parent, cal_table.parent),
-        vis=str(cal_ms.path),
-        caltable=str(cal_table),
-        solint=gain_cal_options.solint,
-        gaintype=gain_cal_options.gaintype,
-        minsnr=gain_cal_options.minsnr,
-        calmode=gain_cal_options.calmode,
-        selectdata=gain_cal_options.selectdata,
-        uvrange=gain_cal_options.uvrange,
+    # First, we collect the solutions for each of the requested SPW
+    spw_and_cal_tables = []
+    channel_ranges = get_channel_ranges_given_nspws_for_ms(
+        ms=cal_ms, nspw=gain_cal_options.nspw
     )
-
-    if not cal_table.exists():
-        logger.critical(
-            "The calibration table was not created. Likely gaincal failed. "
+    for idx, channel_range in enumerate(channel_ranges):
+        logger.info(f"Calibrating {idx + 1} of {len(channel_ranges)}, {channel_range=}")
+        spw_str = f"0:{channel_range[0]}~{channel_range[1]}"
+        cal_table = create_and_check_caltable_path(
+            ms=cal_ms, channel_range=channel_range
         )
-        if raise_error_on_fail:
-            raise GainCalError(f"Gaincal failed for {cal_ms.path}")
-        else:
-            return ms
 
-    logger.info("Solutions have been solved. Applying them. ")
-
-    applycal(
-        container=casa_container,
-        bind_dirs=(cal_ms.path.parent, cal_table.parent),
-        vis=str(cal_ms.path),
-        gaintable=str(cal_table),
-    )
-
-    # This is used for when a frequency dependent self-calibration solution is requested
-    # It is often useful (mandatory!) to have a single spw for some tasks - both of the casa
-    # and everyone else variety.
-    if gain_cal_options.nspw > 1:
-        # putting it all back to a single spw
-        cal_ms_path = merge_spws_in_ms(
-            casa_container=casa_container, ms_path=cal_ms.path
+        gaincal(
+            container=casa_container,
+            bind_dirs=(cal_ms.path.parent, cal_table.parent),
+            vis=str(cal_ms.path),
+            caltable=str(cal_table),
+            spw=spw_str,
+            solint=gain_cal_options.solint,
+            gaintype=gain_cal_options.gaintype,
+            minsnr=gain_cal_options.minsnr,
+            calmode=gain_cal_options.calmode,
+            selectdata=gain_cal_options.selectdata,
+            uvrange=gain_cal_options.uvrange,
         )
-        # At the time of writing merge_spws_in_ms returns the ms_path=,
-        # but this pirate trusts no one.
-        cal_ms = cal_ms.with_options(path=cal_ms_path)
 
-    if archive_cal_table:
-        zip_folder(in_path=cal_table)
+        if not cal_table.exists():
+            logger.critical(
+                "The calibration table was not created. Likely gaincal failed. "
+            )
+            if raise_error_on_fail:
+                raise GainCalError(f"Gaincal failed for {cal_ms.path}")
+            else:
+                return ms
+
+        spw_and_cal_tables.append((spw_str, cal_table))
+
+    # Now apply each of the solutions to the corresponding SPW.
+    # Relying on the spw= channel selection to only be updating
+    # the visibilities in the existing CORRECTED_DATA column,
+    # not overwriting the entire column
+    for idx, (spw_str, cal_table) in enumerate(spw_and_cal_tables):
+        logger.info(
+            f"{idx + 1} of {len(spw_and_cal_tables)}, applying solutions for {spw_str}"
+        )
+        applycal(
+            container=casa_container,
+            bind_dirs=(cal_ms.path.parent, cal_table.parent),
+            vis=str(cal_ms.path),
+            gaintable=str(cal_table),
+            spw=spw_str,
+            flagbackup=False,
+        )
+
+        if archive_cal_table:
+            zip_folder(in_path=cal_table)
 
     flag_versions_table = cal_ms.path.with_suffix(".ms.flagversions")
     if flag_versions_table.exists():

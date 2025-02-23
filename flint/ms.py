@@ -350,6 +350,7 @@ def describe_ms(ms: MS | Path, verbose: bool = False) -> MSSummary:
 
     """
     ms = MS(path=ms) if isinstance(ms, Path) else ms
+    logger.info(f"Obtaining MSSummary for {ms.path}")
 
     with table(str(ms.path), readonly=True, ack=False) as tab:
         colnames = tab.colnames()
@@ -789,7 +790,7 @@ def preprocess_askap_ms(
 
     logger.info("Applying rotation matrix to correlations. ")
     logger.info(
-        f"Rotating visibilities for {ms.path} with data_column={instrument_column} amd corrected_data_column={data_column}"
+        f"Rotating visibilities for {ms.path} with data_column={instrument_column} and corrected_data_column={data_column}"
     )
     fix_ms_corrs(
         ms=ms.path,
@@ -856,7 +857,7 @@ def copy_and_preprocess_casda_askap_ms(
 
     logger.info("Applying rotation matrix to correlations. ")
     logger.info(
-        f"Rotating visibilities for {ms.path} with data_column={instrument_column} amd corrected_data_column={data_column}"
+        f"Rotating visibilities for {ms.path} with data_column={instrument_column} and corrected_data_column={data_column}"
     )
     fix_ms_corrs(
         ms=ms.path,

@@ -6,7 +6,7 @@ from configargparse import ArgumentParser
 from prefect import flow, tags, unmapped
 from prefect.futures import PrefectFuture
 
-from flint.coadd.linmos import LinmosResult
+from flint.coadd.linmos import LinmosOptions, LinmosResult
 from flint.configuration import (
     POLARISATION_MAPPING,
     get_options_from_strategy,
@@ -43,6 +43,7 @@ from flint.prefect.common.imaging import (
 )
 from flint.prefect.common.utils import (
     task_create_field_summary,
+    task_create_object,
     task_get_channel_images_from_paths,
     task_getattr,
     task_rename_linear_to_stokes,
@@ -186,17 +187,21 @@ def process_science_fields_pol(
     if "i" not in stokes_beam_cubes.keys():
         force_remove_leakage = False
 
+    linmos_options = task_create_object(
+        object=LinmosOptions,
+        holofile=pol_field_options.holofile,
+        cutoff=pol_field_options.pb_cutoff,
+        stokesi_images=stokes_beam_cubes.get("i"),
+        force_remove_leakage=force_remove_leakage,
+        trim_linmos_fits=pol_field_options.trim_linmos_fits,
+    )
     for stokes, beam_cubes in stokes_beam_cubes.items():
         with tags(f"stokes-{stokes}"):
             linmos_result = task_linmos_images.submit(
-                images=beam_cubes,
+                image_list=beam_cubes,
                 container=pol_field_options.yandasoft_container,
-                holofile=pol_field_options.holofile,
-                cutoff=pol_field_options.pb_cutoff,
+                linmos_options=linmos_options,
                 field_summary=field_summary,
-                stokesi_images=stokes_beam_cubes.get("i"),
-                force_remove_leakage=force_remove_leakage,
-                trim_linmos_fits=pol_field_options.trim_linmos_fits,
             )
             linmos_result_list.append(linmos_result)
 

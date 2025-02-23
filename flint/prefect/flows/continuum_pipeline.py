@@ -251,7 +251,7 @@ def process_science_fields(
         mss=preprocess_science_mss,
         cal_sbid_path=bandpass_path,
         holography_path=field_options.holofile,
-    )  # type: ignore
+    ).result()  # type: ignore
     logger.info(f"{field_summary=}")
 
     if field_options.wsclean_container is None:
@@ -318,7 +318,7 @@ def process_science_fields(
             wsclean_results=wsclean_results,
             field_options=field_options,
             field_summary=field_summary,
-            current_round=None,
+            additional_linmos_suffix_str="noselfcal",  # indicate in output linmos name no selfcal
         )
         archive_wait_for.extend(parsets)
         parset = parsets[-1]
@@ -353,6 +353,12 @@ def process_science_fields(
                 skip_selfcal_on_rounds=field_options.skip_selfcal_on_rounds,
             )
 
+            update_gain_options = get_options_from_strategy(
+                strategy=strategy,
+                mode="gaincal",
+                round_info=current_round,
+                operation="selfcal",
+            )
             cal_mss = task_gaincal_applycal_ms.map(
                 ms=wsclean_results,
                 selfcal_round=current_round,
@@ -361,14 +367,7 @@ def process_science_fields(
                 rename_ms=field_options.rename_ms,
                 archive_cal_table=True,
                 casa_container=field_options.casa_container,
-                update_gain_cal_options=unmapped(
-                    get_options_from_strategy(
-                        strategy=strategy,
-                        mode="gaincal",
-                        round_info=current_round,
-                        operation="selfcal",
-                    )
-                ),
+                update_gain_cal_options=unmapped(update_gain_options),
                 wait_for=[
                     field_summary
                 ],  # To make sure field summary is created with unzipped MSs
@@ -398,31 +397,29 @@ def process_science_fields(
                     if (current_round >= 2 or not beam_aegean_outputs)
                     else beam_aegean_outputs
                 )
+                update_masking_options = get_options_from_strategy(
+                    strategy=strategy,
+                    mode="masking",
+                    round_info=current_round,
+                    operation="selfcal",
+                )
                 fits_beam_masks = task_create_image_mask_model.map(
                     image=wsclean_results,
                     image_products=beam_aegean_outputs,
-                    update_masking_options=unmapped(
-                        get_options_from_strategy(
-                            strategy=strategy,
-                            mode="masking",
-                            round_info=current_round,
-                            operation="selfcal",
-                        )
-                    ),
+                    update_masking_options=unmapped(update_masking_options),
                 )  # type: ignore
 
+            update_wsclean_options = get_options_from_strategy(
+                strategy=strategy,
+                mode="wsclean",
+                operation="selfcal",
+                round_info=current_round,
+            )
             wsclean_results = task_wsclean_imager.map(
                 in_ms=cal_mss,
                 wsclean_container=field_options.wsclean_container,
                 fits_mask=fits_beam_masks,
-                update_wsclean_options=unmapped(
-                    get_options_from_strategy(
-                        strategy=strategy,
-                        mode="wsclean",
-                        operation="selfcal",
-                        round_info=current_round,
-                    )
-                ),
+                update_wsclean_options=unmapped(update_wsclean_options),
             )
             wsclean_results = (
                 task_add_model_source_list_to_ms.map(
@@ -447,7 +444,6 @@ def process_science_fields(
                     wsclean_results=wsclean_results,
                     field_options=field_options,
                     field_summary=field_summary,
-                    current_round=current_round,
                 )
                 archive_wait_for.extend(parsets_self)
 
@@ -493,15 +489,12 @@ def process_science_fields(
                 update_wsclean_options=unmapped(stokes_v_wsclean_options),
                 fits_mask=fits_beam_masks,
                 wait_for=wsclean_results,  # Ensure that measurement sets are doubled up during imaging
-            )  # type: ignore
+            )
             if field_options.yandasoft_container:
                 parsets = create_convol_linmos_images(
                     wsclean_results=wsclean_results,
                     field_options=field_options.with_options(linmos_residuals=False),
                     field_summary=field_summary,
-                    current_round=(
-                        field_options.rounds if field_options.rounds else None
-                    ),
                 )
                 archive_wait_for.extend(parsets)
 
@@ -522,7 +515,7 @@ def process_science_fields(
             max_round=field_options.rounds if field_options.rounds else None,
             update_archive_options=update_archive_options,
             wait_for=archive_wait_for,
-        )  # type: ignore
+        )
 
 
 def setup_run_process_science_field(

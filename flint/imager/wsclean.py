@@ -100,7 +100,7 @@ class WSCleanOptions(BaseOptions):
     """Image size, only a single dimension is required. Note that this means images will be squares. """
     local_rms: bool = True
     """Whether a local rms map is computed"""
-    force_mask_rounds: int | None = 10
+    force_mask_rounds: int | None = None
     """Round of force masked derivation"""
     auto_mask: float | None = 3.5
     """How deep the construct clean mask is during each cycle"""
@@ -190,6 +190,8 @@ class WSCleanOptions(BaseOptions):
     flint_timestep: float | None = None
     """the fast-imaging timestep to write out (in seconds). Will be used to work out what wsclean intervals-out
     should be. note THIS IS NOT A WSCLEAN OPTION"""
+    no_mf_weighting: bool = False
+    """Opposite of -ms-weighting; can be used to turn off MF weighting in -join-channels mode"""
 
 
 class WSCleanResult(BaseOptions):
@@ -753,7 +755,7 @@ def _resolve_wsclean_key_value_to_cli_str(key: str, value: Any) -> ResolvedCLIRe
     original_key = key
     key = key.replace("_", "-")
 
-    if original_key.startswith("flint_") or original_key == "timestep":
+    if original_key.startswith("flint_") or original_key == "flint_timestep":
         # No need to do anything more
         return ResolvedCLIResult(ignore=True)
     elif key == "size":
@@ -826,17 +828,17 @@ def create_wsclean_cmd(
     wsclean_options_dict = wsclean_options._asdict()
 
     if (
-        "timestep" in wsclean_options_dict.keys()
-        and wsclean_options_dict["timestep"] is not None
+        "flint_timestep" in wsclean_options_dict.keys()
+        and wsclean_options_dict["flint_timestep"] is not None
     ):
         # TIME DOMAIN MODE ACTIVATE
         # note this will over-write anything already in intervals-out
         logger.info(
-            """Found nonzero "timestep" argument. Converting to intervals-out for wsclean."""
+            """Found nonzero `flint_timestep` argument. Converting to intervals-out for wsclean."""
         )
-        intervals_out = get_fast_imaging_intervals(ms, wsclean_options_dict["timestep"])
+        intervals_out = get_fast_imaging_intervals(ms, wsclean_options_dict["flint_timestep"])
         wsclean_options_dict["intervals_out"] = intervals_out
-    del wsclean_options_dict["timestep"]
+    #del wsclean_options_dict["flint_timestep"] #don't need to do this because it gets ignored
 
     unknowns: list[tuple[Any, Any]] = []
     logger.info("Creating wsclean command.")
