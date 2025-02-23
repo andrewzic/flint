@@ -486,6 +486,7 @@ def get_wsclean_output_names(  #
     pols: str | tuple[str] | tuple[str, ...] | None = None,
     verify_exists: bool = False,
     include_mfs: bool = True,
+    time_domain_mode: bool = False,
     output_types: str | Collection[str] = (
         "image",
         "dirty",
@@ -527,7 +528,10 @@ def get_wsclean_output_names(  #
         None,
     ]
     if subbands and subbands > 1:
-        subband_strs = [f"{subband:04}" for subband in range(subbands)]
+        #prepend subband with tXXXX to denote time interval image rather than channel image.
+        subband_strs = [
+            f"t{subband:04}" for subband in range(subbands) if time_domain_mode else f"{subband:04}"
+        ]
         if include_mfs:
             subband_strs.append("MFS")
 
@@ -543,7 +547,7 @@ def get_wsclean_output_names(  #
         output_types = (output_types,)
 
     images: dict[str, list[Path]] = {}
-    for image_type in ("image", "dirty", "model", "residual"):
+    for image_type in ("image", "dirty", "model", "residual", "uv-real", "uv-imag"):
         if image_type not in output_types:
             continue
 
@@ -836,12 +840,19 @@ def create_wsclean_cmd(
         logger.info(
             """Found nonzero `flint_timestep` argument. Converting to intervals-out for wsclean."""
         )
-        intervals_out = get_fast_imaging_intervals(
+        fi_intervals_out = get_fast_imaging_intervals(
             ms, wsclean_options_dict["flint_timestep"]
         )
-        wsclean_options_dict["intervals_out"] = intervals_out
+        
+        wsclean_options_dict["intervals_out"] = fi_intervals_out
+        # update the wsclean_options_dict using _replace
+        # this is illegal but I am doing it anyway so that stuff that calls
+        # wsclean_result.options.intervals_out later on has sensible info
+        if wsclean_options.intervals_out is None or wsclean_options.intervals_out != fi_intervals_out:
+            wsclean_options = wsclean_options._replace(intervals_out=fi_intervals_out)
+    
     # del wsclean_options_dict["flint_timestep"] #don't need to do this because it gets ignored
-
+    
     unknowns: list[tuple[Any, Any]] = []
     logger.info("Creating wsclean command.")
 
@@ -1096,6 +1107,7 @@ def run_wsclean_imager(
     wsclean_result: WSCleanResult,
     container: Path,
     make_cube_from_subbands: bool = True,
+    output_types: tuple = ("image", "residual"),
 ) -> ImageSet:
     """Run a provided wsclean command. Optionally will clean up files,
     including the dirty beams, psfs and other assorted things.
@@ -1119,6 +1131,7 @@ def run_wsclean_imager(
 
     ms = wsclean_result.ms
     single_channel = wsclean_result.options.channels_out == 1
+    time_domain_mode = wsclean_result.options.intervals_out is not None and wsclean_result.options.intervals_out > 1:
     wsclean_cleanup = wsclean_result.cleanup
     bind_dirs = wsclean_result.bind_dirs
     move_hold_directories = wsclean_result.move_hold_directories
@@ -1178,13 +1191,19 @@ def run_wsclean_imager(
 
     pols = _make_pols(pol_str=wsclean_result.options.pol)
 
+    ###ADD TIME DOMAIN INFO HERE
+    n_subbands = wsclean_result.options.intervals_out if time_domain_mode \
+        else wsclean_result.options.channels_out
+    if time_domain_mode:
+        logger.info(f"using time_domain_mode. Using {} intervals_out for n_subbands")
     image_set = get_wsclean_output_names(
         prefix=prefix,
-        subbands=wsclean_result.options.channels_out,
+        subbands=n_subbands,
         pols=pols,
         verify_exists=True,
-        output_types=("image", "residual"),
+        output_types=output_types,
         check_exists_when_adding=True,
+        time_domain_mode=time_domain_mode,
     )
 
     if wsclean_result.options.save_source_list:
@@ -1197,7 +1216,9 @@ def run_wsclean_imager(
 
     if make_cube_from_subbands:
         image_set = combine_image_set_to_cube(
-            image_set=image_set, remove_original_images=True
+            image_set=image_set,
+            remove_original_images=True,
+            time_domain_mode=time_domain_mode,
         )
 
     image_set = rename_wsclean_prefix_in_image_set(input_image_set=image_set)
@@ -1234,6 +1255,10 @@ def wsclean_imager(
 
     assert ms.column is not None, "A MS column needs to be elected for imaging. "
     wsclean_options = wsclean_options.with_options(data_column=ms.column)
+    
+    #AZ: I think I added timedomain stuff to get parsed in here??
+    # yes, I did. This will either use intervals_out or flint_timestep and amend
+    # wsclean_options as required
     wsclean_result = create_wsclean_cmd(
         ms=ms,
         wsclean_options=wsclean_options,
