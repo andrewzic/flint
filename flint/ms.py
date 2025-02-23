@@ -23,7 +23,6 @@ from typing import NamedTuple
 
 import astropy.units as u
 import numpy as np
-import yaml
 from astropy.coordinates import EarthLocation, SkyCoord
 from astropy.time import Time
 from casacore.tables import table, taql
@@ -1024,19 +1023,6 @@ def get_fast_imaging_intervals(ms: MS | Path, timestep: float | None = None) -> 
     logger.info(f"Effective timestep is {real_timestep} s")
 
     return intervals_out
-
-
-def read_config(fname):
-    # read configuration file
-    if os.path.isfile(fname):
-        with open(fname) as yaml_file:
-            config = yaml.safe_load(yaml_file)
-        return config
-
-    else:
-        print("Cannot find configuration file")
-        print(f"{fname} does not exists")
-        sys.exit()
 
 
 def get_parser() -> ArgumentParser:
