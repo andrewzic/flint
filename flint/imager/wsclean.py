@@ -836,9 +836,11 @@ def create_wsclean_cmd(
         logger.info(
             """Found nonzero `flint_timestep` argument. Converting to intervals-out for wsclean."""
         )
-        intervals_out = get_fast_imaging_intervals(ms, wsclean_options_dict["flint_timestep"])
+        intervals_out = get_fast_imaging_intervals(
+            ms, wsclean_options_dict["flint_timestep"]
+        )
         wsclean_options_dict["intervals_out"] = intervals_out
-    #del wsclean_options_dict["flint_timestep"] #don't need to do this because it gets ignored
+    # del wsclean_options_dict["flint_timestep"] #don't need to do this because it gets ignored
 
     unknowns: list[tuple[Any, Any]] = []
     logger.info("Creating wsclean command.")

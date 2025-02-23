@@ -11,9 +11,7 @@ from __future__ import (  # Used for mypy/pylance to like the return type of MS.
     annotations,
 )
 
-import os
 import shutil
-import sys
 from argparse import ArgumentParser
 from contextlib import contextmanager
 from curses.ascii import controlnames
