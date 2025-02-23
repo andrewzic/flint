@@ -1267,6 +1267,7 @@ def wsclean_imager(
         wsclean_result=wsclean_result,
         container=wsclean_container,
         make_cube_from_subbands=make_cube_from_subbands,
+        output_types=("image", "residual"),
     )
 
     return wsclean_result.with_options(image_set=image_set)
