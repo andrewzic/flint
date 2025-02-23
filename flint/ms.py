@@ -11,7 +11,9 @@ from __future__ import (  # Used for mypy/pylance to like the return type of MS.
     annotations,
 )
 
+import os
 import shutil
+import sys
 from argparse import ArgumentParser
 from contextlib import contextmanager
 from curses.ascii import controlnames
@@ -21,6 +23,7 @@ from typing import NamedTuple
 
 import astropy.units as u
 import numpy as np
+import yaml
 from astropy.coordinates import EarthLocation, SkyCoord
 from astropy.time import Time
 from casacore.tables import table, taql
@@ -31,6 +34,17 @@ from flint.logging import logger
 from flint.naming import create_ms_name
 from flint.options import MS
 from flint.utils import copy_directory, rsync_copy_directory
+
+
+class UniqueTimes(NamedTuple):
+    """Structure to hold information about times from ms"""
+
+    tsamp: float
+    """Sampling time in seconds"""
+    nsub: int
+    """Number of time samples"""
+    times: Time
+    """Array of unique times in as astropy Time array in MJD format"""
 
 
 class MSSummary(NamedTuple):
@@ -234,6 +248,27 @@ def get_times_from_ms(ms: MS | Path) -> Time:
         times = Time(tab.getcol("TIME") * u.s, format="mjd")
 
     return times
+
+
+def get_unique_times_from_ms(ms: MS | Path) -> UniqueTimes:
+    """Return the unique observation times from an ASKAP Measurement
+    set along with the number of integrations and time sampling.
+
+    Useful for making cubes
+
+    Args:
+        ms (Union[MS, Path]): Measurement set to inspect
+
+    Returns:
+        Time: The observation times
+    """
+    ms = MS.cast(ms)
+    with table(str(ms.path), ack=False) as tab:
+        times = Time(np.unique(tab.getcol("TIME")) * u.s, format="mjd")
+
+    nsub = len(times)
+    tsamp = np.median(np.diff(times)).sec.item()
+    return UniqueTimes(tsamp, nsub, times)
 
 
 def get_telescope_location_from_ms(ms: MS | Path) -> EarthLocation:
@@ -962,6 +997,46 @@ def find_mss(
         )
 
     return found_mss
+
+
+def get_fast_imaging_intervals(ms: MS | Path, timestep: float | None = None) -> int:
+    """
+    Get number of time-intervals from a measurement set for a given imaging timestep
+    Convenience function for wsclean -intervals-out
+    Args:
+        ms (MS): The subject measurement set to rename
+        timestep: float (in seconds) for doing short-imaging over
+    Returns:
+        intervals_out (int): the number of intervals to pass to wsclean
+    """
+    UniqueTime_ = get_unique_times_from_ms(ms)
+    interval, nsub, times = UniqueTime_  # int, float, Time
+    duration = (times.max() - times.min()).sec.item()  # sec
+
+    ms = MS(path=ms) if isinstance(ms, Path) else ms
+
+    if timestep is None:
+        intervals_out = nsub
+    else:
+        intervals_out = np.max([1, np.round(duration / timestep).astype(int)])
+    real_timestep = duration / intervals_out
+    logger.info(f"Got {intervals_out} intervals for {timestep} s")
+    logger.info(f"Effective timestep is {real_timestep} s")
+
+    return intervals_out
+
+
+def read_config(fname):
+    # read configuration file
+    if os.path.isfile(fname):
+        with open(fname) as yaml_file:
+            config = yaml.safe_load(yaml_file)
+        return config
+
+    else:
+        print("Cannot find configuration file")
+        print(f"{fname} does not exists")
+        sys.exit()
 
 
 def get_parser() -> ArgumentParser:

@@ -35,7 +35,7 @@ from flint.exceptions import (
     NotSupportedError,
 )
 from flint.logging import logger
-from flint.ms import MS
+from flint.ms import MS, get_fast_imaging_intervals
 from flint.naming import (
     create_image_cube_name,
     create_imaging_name_prefix,
@@ -71,6 +71,10 @@ class ImageSet(BaseOptions):
     """Model images.  """
     residual: list[Path] | None = None
     """Residual images."""
+    uv_real: list[Path] | None = None
+    """real component of gridded visibilities"""
+    uv_imag: list[Path] | None = None
+    """imag component of gridded visibilities"""
     source_list: Path | None = None
     """Path to a source list that accompanies the image data"""
 
@@ -172,12 +176,20 @@ class WSCleanOptions(BaseOptions):
     """The polarisation to be imaged"""
     save_source_list: bool = False
     """Saves the found clean components as a BBS/DP3 text sky model"""
+    save_uv: bool = False
+    """Save the gridded uv plane, i.e., the FFT of the residual image. The UV plane is complex, hence
+    two images will be output: <prefix>-uv-real.fits and <prefix>-uv-imag.fits"""
     channel_range: tuple[int, int] | None = None
     """Image a channel range between a lower (inclusive) and upper (exclusive) bound"""
+    intervals_out: int | None = None
+    """Image multiple intervals out (for fast imaging or otherwise)"""
     no_reorder: bool = False
     """If True turn off the reordering of the MS at the beginning of wsclean"""
     flint_no_log_wsclean_output: bool = False
     """If True do not log the wsclean output"""
+    flint_timestep: float | None = None
+    """the fast-imaging timestep to write out (in seconds). Will be used to work out what wsclean intervals-out
+    should be. note THIS IS NOT A WSCLEAN OPTION"""
 
 
 class WSCleanResult(BaseOptions):
@@ -478,6 +490,8 @@ def get_wsclean_output_names(  #
         "residual",
         "model",
         "psf",
+        "uv-real",
+        "uv-imag",
     ),
     check_exists_when_adding: bool = False,
 ) -> ImageSet:
@@ -739,7 +753,7 @@ def _resolve_wsclean_key_value_to_cli_str(key: str, value: Any) -> ResolvedCLIRe
     original_key = key
     key = key.replace("_", "-")
 
-    if original_key.startswith("flint_"):
+    if original_key.startswith("flint_") or original_key == "timestep":
         # No need to do anything more
         return ResolvedCLIResult(ignore=True)
     elif key == "size":
@@ -810,6 +824,19 @@ def create_wsclean_cmd(
     hold_directory: Path | None = Path(name_argument_path).parent
 
     wsclean_options_dict = wsclean_options._asdict()
+
+    if (
+        "timestep" in wsclean_options_dict.keys()
+        and wsclean_options_dict["timestep"] is not None
+    ):
+        # TIME DOMAIN MODE ACTIVATE
+        # note this will over-write anything already in intervals-out
+        logger.info(
+            """Found nonzero "timestep" argument. Converting to intervals-out for wsclean."""
+        )
+        intervals_out = get_fast_imaging_intervals(ms, wsclean_options_dict["timestep"])
+        wsclean_options_dict["intervals_out"] = intervals_out
+    del wsclean_options_dict["timestep"]
 
     unknowns: list[tuple[Any, Any]] = []
     logger.info("Creating wsclean command.")
@@ -883,6 +910,7 @@ def _rotate_cube(output_cube_name) -> None:
 def combine_image_set_to_cube(
     image_set: ImageSet,
     remove_original_images: bool = False,
+    time_domain_mode: bool = False,
 ) -> ImageSet:
     """Combine wsclean subband channel images into a cube. Each collection attribute
     of the input `image_set` will be inspected. The MFS images will be ignored.
@@ -892,9 +920,10 @@ def combine_image_set_to_cube(
     Args:
         image_set (ImageSet): Collection of wsclean image productds
         remove_original_images (bool, optional): If True, images that went into the cube are removed. Defaults to False.
+        time_domain_mode (bool, optional): If True, run combine_fits in time_domain_mode. Defaults to False
 
     Returns:
-        ImageSet: Updated iamgeset describing the new outputs
+        ImageSet: Updated imageset describing the new outputs
     """
     logger.info("Combining subband image products into fits cubes")
 
@@ -905,7 +934,7 @@ def combine_image_set_to_cube(
 
     image_set_dict = options_to_dict(input_options=image_set)
 
-    for mode in ("image", "residual", "dirty", "model", "psf"):
+    for mode in ("image", "residual", "dirty", "model", "psf", "uv-real", "uv-imag"):
         if image_set_dict[mode] is None or not isinstance(
             image_set_dict[mode], (list, tuple)
         ):
@@ -913,26 +942,38 @@ def combine_image_set_to_cube(
             continue
 
         subband_images = [
-            image for image in image_set_dict[mode] if "-MFS-" not in str(image)
-        ]
+            image for image in image_set_dict[mode] if ("-MFS-" not in str(image))
+        ]  # this is good also for time-domain
+
         if len(subband_images) <= 1:
             logger.info(f"Not enough subband images for {mode=}, not creating a cube")
             continue
 
+        # do we want to edit this to have info that cubes are in time domain or not??
         output_cube_name = create_image_cube_name(
             image_prefix=Path(image_set.prefix), mode=mode
         )
 
         logger.info(f"Combining {len(subband_images)} images. {subband_images=}")
-        freqs = combine_fits(file_list=subband_images, out_cube=output_cube_name)
+
+        unit = "s" if time_domain_mode else "Hz"
+        # spequencies = dimension-agnostic name for frequency or time
+        spequencies = "freqs" if time_domain_mode else "times"
+        specs = combine_fits(
+            file_list=subband_images,
+            out_cube=output_cube_name,
+            time_domain_mode=time_domain_mode,
+        )
 
         _rotate_cube(output_cube_name)
 
         # Write out the hdu to preserve the beam table constructed in fitscube
         logger.info(f"Writing {output_cube_name=}")
 
-        output_freqs_name = Path(output_cube_name).with_suffix(".freqs_Hz.txt")
-        np.savetxt(output_freqs_name, freqs.to("Hz").value)
+        output_specs_name = Path(output_cube_name).with_suffix(
+            f".{spequencies}_{unit}.txt"
+        )
+        np.savetxt(output_specs_name, specs.to(f"{unit}").value)
 
         image_set_dict[mode] = [Path(output_cube_name)] + [
             image for image in image_set_dict[mode] if image not in subband_images
@@ -950,32 +991,42 @@ def combine_images_to_cube(
     prefix: str,
     mode: str,
     remove_original_images: bool = False,
+    time_domain_mode: bool = False,
 ) -> Path:
-    """Combine wsclean subband channel images into a cube. Each collection attribute
-    of the input `image_set` will be inspected. The MFS images will be ignored.
+    """Combine wsclean subband channel or time interval images into a cube. Each collection attribute
+    of the input `image_set` will be inspected.
+    For subband-channels, The MFS images will be ignored.
 
     A output file name will be generated based on the  prefix and mode (e.g. `image`, `residual`, `psf`, `dirty`).
 
     Args:
         image_set (ImageSet): Collection of wsclean image productds
         remove_original_images (bool, optional): If True, images that went into the cube are removed. Defaults to False.
+        time_domain_mode (bool, optional): If True, run combine_fits in time_domain_mode. Defaults to False
 
     Returns:
-        ImageSet: Updated iamgeset describing the new outputs
+        ImageSet: Updated imageset describing the new outputs
     """
     logger.info("Combining subband images into fits cubes")
 
     output_cube_name = create_image_cube_name(image_prefix=Path(prefix), mode=mode)
 
     logger.info(f"Combining {len(images)} images. {images=}")
-    freqs = combine_fits(file_list=images, out_cube=output_cube_name)
+
+    unit = "s" if time_domain_mode else "Hz"
+    # spequencies = dimension-agnostic name for frequency or time
+    spequencies = "freqs" if time_domain_mode else "times"
+    specs = combine_fits(
+        file_list=images, out_cube=output_cube_name, time_domain_mode=time_domain_mode
+    )
+
     _rotate_cube(output_cube_name)
 
     # Write out the hdu to preserve the beam table constructed in fitscube
     logger.info(f"Writing {output_cube_name=}")
 
-    output_freqs_name = output_cube_name.with_suffix(".freqs_Hz.txt")
-    np.savetxt(output_freqs_name, freqs.to("Hz").value)
+    output_specs_name = Path(output_cube_name).with_suffix(f".{spequencies}_{unit}.txt")
+    np.savetxt(output_specs_name, specs.to(f"{unit}").value)
 
     if remove_original_images:
         remove_files_folders(*images)
@@ -1231,6 +1282,9 @@ def cli() -> None:
             logger.setLevel(logging.DEBUG)
 
         ms = MS(path=args.ms, column=args.data_column)
+        # parser should have either --intervals out or -interval
+        # then create_options_from_parser should convert that to wsclean
+        # intervals-out as required
         wsclean_options: WSCleanOptions = create_options_from_parser(
             parser_namespace=args,
             options_class=WSCleanOptions,  # type: ignore
